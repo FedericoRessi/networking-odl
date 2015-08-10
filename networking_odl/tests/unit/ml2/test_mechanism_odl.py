@@ -34,6 +34,10 @@ from neutron.tests import base
 from neutron.tests.unit.plugins.ml2 import test_plugin
 from neutron.tests.unit import testlib_api
 
+
+cfg.CONF.import_group('ml2_odl', 'networking_odl.common.config')
+
+
 HOST = 'fake-host'
 PLUGIN_NAME = 'neutron.plugins.ml2.plugin.Ml2Plugin'
 FAKE_NETWORK = {'status': 'ACTIVE',
@@ -457,7 +461,7 @@ class OpenDaylightMechanismDriverTestCase(base.BaseTestCase):
             self.assertEqual(tenant_id, port['tenant_id'])
 
 
-class TestOpenDaylightDriver(base.DietTestCase):
+class TestOpenDaylightMechanismDriver(base.DietTestCase):
 
     # given valid  and invalid segments
     valid_segment = {
@@ -472,75 +476,21 @@ class TestOpenDaylightDriver(base.DietTestCase):
         api.SEGMENTATION_ID: 'API_SEGMENTATION_ID',
         api.PHYSICAL_NETWORK: 'API_PHYSICAL_NETWORK'}
 
-    @mock.patch.object(mech_driver, 'cfg')
-    def test_get_vif_type(self, cfg):
-        given_port_context = mock.MagicMock(spec=api.PortContext)
-        given_back_end = mech_driver.OpenDaylightDriver()
-
-        # when getting VIF type
-        vif_type = given_back_end._get_vif_type(given_port_context)
-
-        # then VIF type is ovs
-        self.assertIs(vif_type, portbindings.VIF_TYPE_OVS)
-
-    def test_check_segment(self):
-        """Validate the _check_segment method."""
-
-        # given driver and all network types
-        given_back_end = mech_driver.OpenDaylightDriver()
-        all_network_types = [constants.TYPE_FLAT, constants.TYPE_GRE,
-                             constants.TYPE_LOCAL, constants.TYPE_VXLAN,
-                             constants.TYPE_VLAN, constants.TYPE_NONE]
-
-        # when checking segments network type
-        valid_types = {
-            network_type
-            for network_type in all_network_types
-            if given_back_end._check_segment({api.NETWORK_TYPE: network_type})}
-
-        # then true is returned only for valid network types
-        self.assertEqual({
-            constants.TYPE_LOCAL, constants.TYPE_GRE, constants.TYPE_VXLAN,
-            constants.TYPE_VLAN}, valid_types)
-
     def test_bind_port_front_end(self):
-        given_front_end = driver.OpenDaylightMechanismDriver()
-        if hasattr(given_front_end, 'check_segment'):
-            self.skip(
-                "Old version of driver front-end doesn't delegate bind_port to"
-                " back-end.")
-
+        given_front_end = mech_driver.OpenDaylightMechanismDriver()
         given_vif_type = "MY_VIF_TYPE"
         given_port_context = self.given_port_context()
         given_back_end = mech_driver.OpenDaylightDriver()
-        given_back_end._get_vif_type = mock.Mock(return_value=given_vif_type)
+        given_back_end._network_topology._get_vif_type = mock.Mock(
+            return_value=given_vif_type)
         given_front_end.odl_drv = given_back_end
 
         # when port is bound
         given_front_end.bind_port(given_port_context)
 
         # then vif type is got calling _get_vif_type
-        given_back_end._get_vif_type.assert_called_once_with(
-            given_port_context)
-
-        # then context binding is setup wit returned vif_type and valid
-        # segment api ID
-        given_port_context.set_binding.assert_called_once_with(
-            self.valid_segment[api.ID], given_vif_type,
-            given_back_end.vif_details, status=n_constants.PORT_STATUS_ACTIVE)
-
-    def test_bind_port_back_end(self):
-        given_vif_type = "MY_VIF_TYPE"
-        given_port_context = self.given_port_context()
-        given_back_end = mech_driver.OpenDaylightDriver()
-        given_back_end._get_vif_type = mock.Mock(return_value=given_vif_type)
-
-        # when port is bound
-        given_back_end.bind_port(given_port_context)
-
-        # then vif type is got calling _get_vif_type
-        given_back_end._get_vif_type.assert_called_once_with(
-            given_port_context)
+        given_back_end._network_topology._get_vif_type.assert_called_once_with(
+            given_port_context.host)
 
         # then context binding is setup wit returned vif_type and valid
         # segment api ID
