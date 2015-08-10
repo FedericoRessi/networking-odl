@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2014 OpenStack Foundation
+# Copyright (c) 2013-2015 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -13,11 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from networking_odl.common import client
-from networking_odl.common import constants as odl_const
-from networking_odl.ml2 import mech_driver
+from os import path
+import unittest
 
 import mock
+from oslo_log import log as logging
 from oslo_serialization import jsonutils
 import requests
 import webob.exc
@@ -27,12 +27,20 @@ from neutron.extensions import portbindings
 from neutron.plugins.common import constants
 from neutron.plugins.ml2 import config as config
 from neutron.plugins.ml2 import driver_api as api
-from neutron.plugins.ml2 import driver_context as driver_context
+from neutron.plugins.ml2 import driver_context
 from neutron.plugins.ml2.drivers.opendaylight import driver
 from neutron.plugins.ml2 import plugin
 from neutron.tests import base
 from neutron.tests.unit.plugins.ml2 import test_plugin
 from neutron.tests.unit import testlib_api
+
+from networking_odl.common import client
+from networking_odl.common import constants as odl_const
+from networking_odl.ml2 import mech_driver
+from networking_odl.ml2 import network_topology
+
+
+LOG = logging.getLogger(__name__)
 
 HOST = 'fake-host'
 PLUGIN_NAME = 'neutron.plugins.ml2.plugin.Ml2Plugin'
@@ -459,6 +467,8 @@ class OpenDaylightMechanismDriverTestCase(base.BaseTestCase):
 
 class TestOpenDaylightDriver(base.DietTestCase):
 
+    # pylint: disable=protected-access
+
     # given valid  and invalid segments
     valid_segment = {
         api.ID: 'API_ID',
@@ -471,6 +481,8 @@ class TestOpenDaylightDriver(base.DietTestCase):
         api.NETWORK_TYPE: constants.TYPE_NONE,
         api.SEGMENTATION_ID: 'API_SEGMENTATION_ID',
         api.PHYSICAL_NETWORK: 'API_PHYSICAL_NETWORK'}
+
+    segments_to_bind = [valid_segment, invalid_segment]
 
     @mock.patch.object(client, 'cfg')
     def test_get_vif_type(self, cfg):
@@ -503,13 +515,12 @@ class TestOpenDaylightDriver(base.DietTestCase):
             constants.TYPE_LOCAL, constants.TYPE_GRE, constants.TYPE_VXLAN,
             constants.TYPE_VLAN}, valid_types)
 
+    @unittest.skipIf(
+        hasattr(driver.OpenDaylightMechanismDriver, 'check_segment'),
+        "Old version of driver front-end doesn't delegate bind_port to"
+        " back-end (see bug #1477483).")
     def test_bind_port_front_end(self):
         given_front_end = driver.OpenDaylightMechanismDriver()
-        if hasattr(given_front_end, 'check_segment'):
-            self.skip(
-                "Old version of driver front-end doesn't delegate bind_port to"
-                " back-end.")
-
         given_vif_type = "MY_VIF_TYPE"
         given_port_context = self.given_port_context()
         given_back_end = mech_driver.OpenDaylightDriver()
@@ -521,7 +532,7 @@ class TestOpenDaylightDriver(base.DietTestCase):
 
         # then vif type is got calling _get_vif_type
         given_back_end._get_vif_type.assert_called_once_with(
-            given_port_context)
+            given_port_context.host)
 
         # then context binding is setup wit returned vif_type and valid
         # segment api ID
@@ -529,8 +540,22 @@ class TestOpenDaylightDriver(base.DietTestCase):
             self.valid_segment[api.ID], given_vif_type,
             given_back_end.vif_details, status=n_constants.PORT_STATUS_ACTIVE)
 
-    def test_bind_port_back_end(self):
-        given_vif_type = "MY_VIF_TYPE"
+    def test_bind_port_back_end_with_vif_type_ovs(self):
+        self._test_bind_port(portbindings.VIF_TYPE_OVS)
+
+    def test_bind_port_back_end_with_vif_type_vhost_user(self):
+        self._test_bind_port(
+            portbindings.VIF_TYPE_VHOST_USER,
+            {'vhostuser_ovs_plug': True,
+             'vhostuser_socket': '/var/run/openvswitch/vhuCURRENT_CON',
+             'vhostuser_mode': 'client'})
+
+    def test_bind_port_without_valid_segment(self):
+        self.segments_to_bind = [self.invalid_segment]
+        self._test_bind_port(portbindings.VIF_TYPE_OVS)
+
+    def _test_bind_port(
+            self, given_vif_type, expected_additional_vif_details=None):
         given_port_context = self.given_port_context()
         given_back_end = mech_driver.OpenDaylightDriver()
         given_back_end._get_vif_type = mock.Mock(return_value=given_vif_type)
@@ -538,24 +563,115 @@ class TestOpenDaylightDriver(base.DietTestCase):
         # when port is bound
         given_back_end.bind_port(given_port_context)
 
-        # then vif type is got calling _get_vif_type
-        given_back_end._get_vif_type.assert_called_once_with(
-            given_port_context)
+        if self.valid_segment in self.segments_to_bind:
+            # then vif type is got calling _get_vif_type
+            given_back_end._get_vif_type.assert_called_once_with(
+                given_port_context.host)
 
-        # then context binding is setup wit returned vif_type and valid
-        # segment api ID
-        given_port_context.set_binding.assert_called_once_with(
-            self.valid_segment[api.ID], given_vif_type,
-            given_back_end.vif_details, status=n_constants.PORT_STATUS_ACTIVE)
+            expected_vif_details = dict(given_back_end.vif_details)
+            if expected_additional_vif_details:
+                expected_vif_details.update(expected_additional_vif_details)
+
+            # then context binding is setup wit returned vif_type and valid
+            # segment api ID
+            given_port_context.set_binding.assert_called_once_with(
+                self.valid_segment[api.ID], given_vif_type,
+                expected_vif_details, status=n_constants.PORT_STATUS_ACTIVE)
+
+        else:
+            self.assertFalse(given_back_end._get_vif_type.called)
+            self.assertFalse(given_port_context.set_binding.called)
 
     def given_port_context(self):
-        from neutron.plugins.ml2 import driver_context as ctx
-
         # given NetworkContext
         network = mock.MagicMock(spec=api.NetworkContext)
 
         # given port context
         return mock.MagicMock(
-            spec=ctx.PortContext, current={'id': 'CURRENT_CONTEXT_ID'},
-            segments_to_bind=[self.valid_segment, self.invalid_segment],
+            spec=driver_context.PortContext,
+            current={'id': 'CURRENT_CONTEXT_ID'},
+            segments_to_bind=self.segments_to_bind,
             network=network)
+
+    def test_get_vif_type_without_vhost_user(self):
+        vif_type = self._test_get_vif_type(
+            'topology_without_vhost_user', ('10.237.214.247',))
+        self.assertIs(vif_type, portbindings.VIF_TYPE_OVS)
+
+    def test_get_vif_type_with_vhost_user(self):
+        vif_type = self._test_get_vif_type(
+            'topology_with_vhost_user', ('192.168.66.1',))
+        self.assertIs(vif_type, portbindings.VIF_TYPE_VHOST_USER)
+
+    def _test_get_vif_type(
+            self, mocked_topology_name, mocked_ip_addresses):
+        request = self.mock_request_network_topology(mocked_topology_name)
+        get_addresses_by_name = self.patch(
+            network_topology.utils, 'get_addresses_by_name',
+            return_value=mocked_ip_addresses)
+
+        given_back_end = mech_driver.OpenDaylightDriver()
+
+        # when getting VIF type
+        vif_type = given_back_end._get_vif_type('my_host_name')
+
+        # then IP addresses are fetched
+        get_addresses_by_name.assert_called_once_with('my_host_name')
+
+        # then topology has been fetched
+        request.assert_called_once_with(
+            method='GET', url=self.NETOWORK_TOPOLOGY_URL, data=None,
+            headers={'Content-Type': 'application/json'},
+            auth=('admin', 'admin'), timeout=5)
+
+        return vif_type
+
+    NETOWORK_TOPOLOGY_URL =\
+        'http://localhost:8181/'\
+        'restconf/operational/network-topology:network-topology/'
+
+    def mock_request_network_topology(self, file_name):
+        # patch given configuration
+        mocked_cfg = self.patch(client, 'cfg')
+        mocked_cfg.CONF.ml2_odl.url =\
+            'http://localhost:8181/controller/nb/v2/neutron'
+        mocked_cfg.CONF.ml2_odl.username = 'admin'
+        mocked_cfg.CONF.ml2_odl.password = 'admin'
+        mocked_cfg.CONF.ml2_odl.timeout = 5
+
+        cached_file_path = path.join(
+            path.dirname(__file__), file_name + '.json')
+
+        if path.isfile(cached_file_path):
+            LOG.debug('Loading topology from file: %r', cached_file_path)
+            with open(cached_file_path, 'rt') as fd:
+                topology = jsonutils.load(fd, encoding='utf-8')
+
+        else:
+            LOG.debug(
+                'Getting topology from ODL: %r', self.NETOWORK_TOPOLOGY_URL)
+            request = requests.get(
+                self.NETOWORK_TOPOLOGY_URL, auth=('admin', 'admin'),
+                headers={'Content-Type': 'application/json'})
+            request.raise_for_status()
+
+            with open(cached_file_path, 'wt') as fd:
+                LOG.debug('Saving topology to file: %r', cached_file_path)
+                topology = request.json()
+                jsonutils.dump(
+                    topology, fd, sort_keys=True, indent=4,
+                    separators=(',', ': '))
+
+        mocked_request = self.patch(
+            mech_driver.odl_client.requests, 'request',
+            return_value=mock.MagicMock(
+                spec=requests.Response,
+                json=mock.MagicMock(return_value=topology)))
+
+        return mocked_request
+
+    def patch(self, target, name, *args, **kwargs):
+        context = mock.patch.object(target, name, *args, **kwargs)
+        patch = context.start()
+        self.addCleanup(context.stop)
+        return patch
