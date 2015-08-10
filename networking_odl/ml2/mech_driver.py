@@ -14,11 +14,13 @@
 #    under the License.
 
 import abc
+import copy
+import os
+import requests
 import six
 
 from oslo_log import log as logging
 from oslo_utils import excutils
-import requests
 
 from neutron.common import constants as n_const
 from neutron.common import exceptions as n_exc
@@ -34,7 +36,10 @@ from networking_odl.common import callback as odl_call
 from networking_odl.common import client as odl_client
 from networking_odl.common import constants as odl_const
 from networking_odl.common import utils as odl_utils
+from networking_odl.ml2 import network_topology
 from networking_odl.openstack.common._i18n import _LE
+from networking_odl.openstack.common._i18n import _LW
+
 
 LOG = logging.getLogger(__name__)
 
@@ -44,6 +49,13 @@ not_found_exception_map = {odl_const.ODL_NETWORKS: n_exc.NetworkNotFound,
                            odl_const.ODL_SGS: sg.SecurityGroupNotFound,
                            odl_const.ODL_SG_RULES:
                                sg.SecurityGroupRuleNotFound}
+
+
+# default location for vhostuser sockets
+VHOSTUSER_SOCKET_DIR = '/var/run/openvswitch'
+
+# prefix for ovs port
+PORT_PREFIX = 'vhu'
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -203,6 +215,7 @@ class OpenDaylightDriver(object):
         self.client = odl_client.OpenDaylightRestClient.create_client()
         self.sec_handler = odl_call.OdlSecurityGroupsHandler(self)
         self.vif_details = {portbindings.CAP_PORT_FILTER: True}
+        self._network_topology = network_topology.NetworkTopology(self.client)
 
     def synchronize(self, operation, object_type, context):
         """Synchronize ODL with Neutron following a configuration change."""
@@ -334,28 +347,40 @@ class OpenDaylightDriver(object):
                 self.out_of_sync = True
 
     def bind_port(self, port_context):
-        """Set binding for all valid segments
+        """Set binding for valid segment
 
         """
 
-        valid_segment = None
+        # Bind port to the first valid segment
         for segment in port_context.segments_to_bind:
             if self._check_segment(segment):
-                valid_segment = segment
+                # Guest best VIF type for given host
+                vif_type = self._get_vif_type(port_context.host)
+                vif_details = self._get_vif_details(
+                    port_context.current['id'], vif_type)
+                LOG.debug(
+                    'Bind port with valid segment:\n'
+                    '\tport: %(port)r\n'
+                    '\tnetwork: %(network)r\n'
+                    '\tsegment: %(segment)r\n'
+                    '\tVIF type: %(vif_type)r\n'
+                    '\tVIF details: %(vif_details)r',
+                    {'port': port_context.current['id'],
+                     'network': port_context.network.current['id'],
+                     'segment': segment, 'vif_type': vif_type,
+                     'vif_details': vif_details})
+                port_context.set_binding(
+                    segment[driver_api.ID], vif_type, vif_details,
+                    status=n_const.PORT_STATUS_ACTIVE)
                 break
 
-        if valid_segment:
-            vif_type = self._get_vif_type(port_context)
-            LOG.debug("Bind port %(port)s on network %(network)s with valid "
-                      "segment %(segment)s and VIF type %(vif_type)r.",
-                      {'port': port_context.current['id'],
-                       'network': port_context.network.current['id'],
-                       'segment': valid_segment, 'vif_type': vif_type})
-
-            port_context.set_binding(
-                segment[driver_api.ID], vif_type,
-                self.vif_details,
-                status=n_const.PORT_STATUS_ACTIVE)
+        else:
+            LOG.warning(
+                _LW('No such valid segment for binding given port:\n'
+                    '\tport: %(port)r\n'
+                    '\tnetwork: %(network)r\n'),
+                {'port': port_context.current['id'],
+                 'network': port_context.network.current['id']})
 
     def _check_segment(self, segment):
         """Verify a segment is valid for the OpenDaylight MechanismDriver.
@@ -368,11 +393,35 @@ class OpenDaylightDriver(object):
         return network_type in [constants.TYPE_LOCAL, constants.TYPE_GRE,
                                 constants.TYPE_VXLAN, constants.TYPE_VLAN]
 
-    def _get_vif_type(self, port_context):
+    def _get_vif_type(self, host_name):
         """Get VIF type string for given PortContext
 
         Dummy implementation: it always returns following constant.
         neutron.extensions.portbindings.VIF_TYPE_OVS
         """
+        # pylint: disable=broad-except
 
-        return portbindings.VIF_TYPE_OVS
+        vif_type = portbindings.VIF_TYPE_OVS
+
+        try:
+            element = self._network_topology.fetch_element_by_host(host_name)
+            vif_type = element.vif_type
+
+        except Exception:
+            LOG.exception(_LE('Unable to detect VIF type.'))
+
+        return vif_type
+
+    def _get_vif_details(self, port_context_id, vif_type):
+        vif_details = copy.copy(self.vif_details)
+        if vif_type == portbindings.VIF_TYPE_VHOST_USER:
+            socket_path = os.path.join(
+                VHOSTUSER_SOCKET_DIR, (PORT_PREFIX + port_context_id)[:14])
+
+            vif_details.update({
+                portbindings.VHOST_USER_MODE:
+                portbindings.VHOST_USER_MODE_CLIENT,
+                portbindings.VHOST_USER_OVS_PLUG: True,
+                portbindings.VHOST_USER_SOCKET: socket_path
+            })
+        return vif_details

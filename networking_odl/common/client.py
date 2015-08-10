@@ -13,10 +13,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# Python framework
+import requests
+
+# 3rd party and portability libraries
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
-import requests
+import six.moves.urllib.parse as urlparse
 
 
 LOG = logging.getLogger(__name__)
@@ -60,3 +64,33 @@ class OpenDaylightRestClient(object):
             LOG.debug("%(urlpath)s doesn't exist", {'urlpath': urlpath})
             return False
         return True
+
+    def get(self, full_path, data=None):
+        return self.request('GET', full_path, data)
+
+    def request(self, method, full_path, data=None):
+        headers = {'Content-Type': 'application/json'}
+        url = self.root_url + full_path
+        LOG.debug("Sending METHOD (%(method)s) URL (%(url)s) JSON (%(data)s)",
+                  {'method': method, 'url': url, 'data': data})
+        response = requests.request(
+            method=method, url=url, headers=headers, data=data, auth=self.auth,
+            timeout=self.timeout)
+        response.raise_for_status()
+        return response
+
+    _root_url = None
+
+    @property
+    def root_url(self):
+        root_url = self._root_url
+        if root_url is None:
+            url = urlparse.urlparse(self.url)
+            port = ''
+            if url.port:
+                port = ':' + str(url.port)
+            else:
+                port = ''
+            self._root_url = root_url = '{}://{}{}/'.format(
+                url.scheme, url.hostname, port)
+        return root_url
