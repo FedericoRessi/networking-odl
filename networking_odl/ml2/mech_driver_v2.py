@@ -43,7 +43,8 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
         self.sg_handler = callback.OdlSecurityGroupsHandler(self)
         self.vif_details = {portbindings.CAP_PORT_FILTER: True}
         self.journal = journal.OpendaylightJournalThread()
-        self._network_topology = network_topology.NetworkTopologyManager()
+        self._network_topology = network_topology.NetworkTopologyManager.\
+            create_topology_manager(vif_details=self.vif_details)
 
     @journal.call_thread_on_end
     def create_network_precommit(self, context):

@@ -127,6 +127,9 @@ function configure_neutron_odl {
     populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl url=$ODL_ENDPOINT
     populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl username=$ODL_USERNAME
     populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl password=$ODL_PASSWORD
+    populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl valid_vif_types=$ODL_VALID_VIF_TYPES
+    populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl network_topology_url=$ODL_NETWORK_TOPOLOGY_URL
+    populate_ml2_config /$Q_PLUGIN_CONF_FILE ml2_odl network_topology_parsers=$ODL_NETWORK_TOPOLOGY_PARSERS
 }
 
 function configure_neutron_odl_lightweight_testing {

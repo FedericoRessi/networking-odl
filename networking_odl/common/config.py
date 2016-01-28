@@ -34,6 +34,19 @@ odl_opts = [
     cfg.BoolOpt('enable_lightweight_testing',
                 default=False,
                 help='Test without real ODL'),
+
+    # Port binding options
+    cfg.StrOpt(
+        name='valid_vif_types',
+        help=_("List of VIF types valid for port binding: ovs, "
+               "vhostuser, etc.")),
+    cfg.StrOpt(
+        'network_topology_url',
+        help=_("Http URL to fetch network topology from ODL.")),
+    cfg.StrOpt(
+        name='network_topology_parsers',
+        help=_("List of knwon network topology parser implementation "
+               "classes.")),
 ]
 
 cfg.CONF.register_opts(odl_opts, "ml2_odl")

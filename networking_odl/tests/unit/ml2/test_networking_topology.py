@@ -13,13 +13,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
+import collections
+import importlib
+import logging
 from os import path
+import sys
 
 import mock
 from oslo_log import log
 from oslo_serialization import jsonutils
 import requests
+import six
 
 from neutron.common import constants as n_constants
 from neutron.extensions import portbindings
@@ -66,13 +70,15 @@ class TestNetworkTopologyManager(base.DietTestCase):
         mocked_cfg.CONF.ml2_odl.username = 'admin'
         mocked_cfg.CONF.ml2_odl.password = 'admin'
         mocked_cfg.CONF.ml2_odl.timeout = 5
+        for handler in logging.root.handlers:
+            handler.setLevel(logging.DEBUG)
 
     @mock.patch.object(cache, 'LOG')
     @mock.patch.object(network_topology, 'LOG')
     def test_fetch_elements_by_host_with_no_entry(
             self, network_topology_logger, cache_logger):
         given_client = self.mock_client('ovs_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '192.168.0.1'])
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.0.1'])
         given_network_topology = network_topology.NetworkTopologyManager(
             client=given_client)
 
@@ -94,7 +100,7 @@ class TestNetworkTopologyManager(base.DietTestCase):
 
     def test_fetch_element_with_ovs_entry(self):
         given_client = self.mock_client('ovs_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
+        self.patch_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
         given_network_topology = network_topology.NetworkTopologyManager(
             client=given_client)
 
@@ -113,7 +119,7 @@ class TestNetworkTopologyManager(base.DietTestCase):
 
     def test_fetch_elements_with_vhost_user_entry(self):
         given_client = self.mock_client('vhostuser_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
         given_network_topology = network_topology.NetworkTopologyManager(
             client=given_client)
 
@@ -133,7 +139,7 @@ class TestNetworkTopologyManager(base.DietTestCase):
              'vhostuser_socket_dir': '/var/run/openvswitch'}],
             [e.to_dict() for e in elements])
 
-    def mock_get_addresses_by_name(self, ips):
+    def patch_get_addresses_by_name(self, ips):
         utils = self.patch(
             network_topology, 'utils',
             mock.Mock(
@@ -155,52 +161,54 @@ class TestNetworkTopologyManager(base.DietTestCase):
 
         return mocked_client
 
-    def test_bind_port_from_mech_driver_with_ovs(self):
+    def patch_client(self, *args, **kwargs):
+        client = self.mock_client(*args, **kwargs)
+        return self.patch(
+            network_topology.NetworkTopologyClient, 'create_client',
+            return_value=client)
 
-        given_client = self.mock_client('ovs_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
-        given_network_topology = network_topology.NetworkTopologyManager(
-            vif_details={'some': 'detail'},
-            client=given_client)
-        self.patch(
-            network_topology, 'NetworkTopologyManager',
-            return_value=given_network_topology)
+    def patch_configuration(self, **kwargs):
+        kwargs.setdefault('url', 'dummy-url')
+        kwargs.setdefault('username', 'dummy-user')
+        kwargs.setdefault('password', 'dummy-password')
+        for name, value in six.iteritems(kwargs):
+            self.patch(
+                network_topology.cfg.CONF.ml2_odl, name, value)
+
+    def test_bind_port_from_mech_driver_with_ovs(self):
+        self.patch_client('ovs_topology.json')
+        self.patch_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
+        self.patch_configuration()
 
         given_driver = mech_driver.OpenDaylightMechanismDriver()
-        given_driver.odl_drv = mech_driver.OpenDaylightDriver()
         given_port_context = self.given_port_context()
 
         # when port is bound
+        given_driver.initialize()
         given_driver.bind_port(given_port_context)
 
         # then context binding is setup with returned vif_type and valid
         # segment api ID
         given_port_context.set_binding.assert_called_once_with(
             self.valid_segment[driver_api.ID], portbindings.VIF_TYPE_OVS,
-            {'some': 'detail'}, status=n_constants.PORT_STATUS_ACTIVE)
+            {'port_filter': True}, status=n_constants.PORT_STATUS_ACTIVE)
 
     def test_bind_port_from_mech_driver_with_vhostuser(self):
-
-        given_client = self.mock_client('vhostuser_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
-        given_network_topology = network_topology.NetworkTopologyManager(
-            vif_details={'some': 'detail'},
-            client=given_client)
-        self.patch(
-            network_topology, 'NetworkTopologyManager',
-            return_value=given_network_topology)
+        self.patch_client('vhostuser_topology.json')
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
+        self.patch_configuration()
 
         given_driver = mech_driver.OpenDaylightMechanismDriver()
-        given_driver.odl_drv = mech_driver.OpenDaylightDriver()
         given_port_context = self.given_port_context()
 
         # when port is bound
+        given_driver.initialize()
         given_driver.bind_port(given_port_context)
 
         expected_vif_details = {
             'vhostuser_socket': '/var/run/openvswitch/vhuCURRENT_CON',
             'vhostuser_ovs_plug': True,
-            'some': 'detail',
+            'port_filter': True,
             'vhostuser_mode': 'client'}
 
         # then context binding is setup with returned vif_type and valid
@@ -210,29 +218,185 @@ class TestNetworkTopologyManager(base.DietTestCase):
             portbindings.VIF_TYPE_VHOST_USER,
             expected_vif_details, status=n_constants.PORT_STATUS_ACTIVE)
 
-    def test_bind_port_from_mech_driver_v2_with_ovs(self):
-        given_client = self.mock_client('ovs_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
-        given_network_topology = network_topology.NetworkTopologyManager(
-            vif_details={'some': 'detail'},
-            client=given_client)
+    def test_bind_port_from_mech_driver_with_ovs_preferred(self):
+        self.patch_client('vhostuser_topology.json')
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
+        self.patch_configuration(valid_vif_types='ovs,vhostuser')
 
-        given_driver = mech_driver_v2.OpenDaylightMechanismDriver()
-        given_driver._network_topology = given_network_topology
+        given_driver = mech_driver.OpenDaylightMechanismDriver()
         given_port_context = self.given_port_context()
 
         # when port is bound
+        given_driver.initialize()
         given_driver.bind_port(given_port_context)
 
         # then context binding is setup with returned vif_type and valid
         # segment api ID
         given_port_context.set_binding.assert_called_once_with(
             self.valid_segment[driver_api.ID], portbindings.VIF_TYPE_OVS,
-            {'some': 'detail'}, status=n_constants.PORT_STATUS_ACTIVE)
+            {'port_filter': True}, status=n_constants.PORT_STATUS_ACTIVE)
+
+    def test_bind_port_from_mech_driver_with_custom_url(self):
+        clreate_client = self.patch_client('vhostuser_topology.json')
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
+        self.patch_configuration(
+            network_topology_url='http://odl-server/just/here')
+
+        given_driver = mech_driver.OpenDaylightMechanismDriver()
+
+        # when driver is initialized
+        given_driver.initialize()
+
+        # then client is created with custom URL
+        clreate_client.assert_called_once_with(
+            network_topology_url='http://odl-server/just/here')
+
+    def test_bind_port_from_mech_driver_with_2_topology_parsers_1(self):
+        self.patch_client('vhostuser_topology.json')
+        self.patch_get_addresses_by_name(['192.168.66.1'])
+
+        class TopologyElement1(network_topology.NetworkTopologyElement):
+            host_addresses = ['192.168.66.1']
+            valid_vif_types = ['ovs']
+            bind_port = mock.Mock()
+
+        element1 = TopologyElement1()
+        parser1 = self.mock_topology_parser(
+            'module1', 'ParserClass1', [element1])
+
+        class TopologyElement2(network_topology.NetworkTopologyElement):
+            host_addresses = ['192.168.66.1']
+            valid_vif_types = ['vhostuser']
+            bind_port = mock.Mock()
+
+        element2 = TopologyElement2()
+        parser2 = self.mock_topology_parser(
+            'module2', 'ParserClass2', [element2])
+
+        self.patch_configuration(
+            valid_vif_types='vhostuser,ovs',
+            network_topology_parsers='module1:ParserClass1,'
+                                     'module2:ParserClass2')
+
+        given_port_context = self.given_port_context()
+        given_driver = mech_driver.OpenDaylightMechanismDriver()
+
+        # when driver is initialized
+        given_driver.initialize()
+        given_driver.bind_port(given_port_context)
+
+        # topology is parsed by both parsers
+        parser1.parse_network_topology.assert_called_once_with(mock.ANY)
+        parser2.parse_network_topology.assert_called_once_with(mock.ANY)
+        self.assertFalse(element1.bind_port.called)
+        element2.bind_port.assert_called_once_with(
+            given_port_context, 'vhostuser', {'port_filter': True})
+
+    def test_bind_port_from_mech_driver_with_2_topology_parsers_2(self):
+        self.patch_client('vhostuser_topology.json')
+        self.patch_get_addresses_by_name(['192.168.66.1'])
+
+        class TopologyElement1(network_topology.NetworkTopologyElement):
+            host_addresses = ['192.168.66.1']
+            valid_vif_types = ['ovs']
+            bind_port = mock.Mock()
+
+        element1 = TopologyElement1()
+        parser1 = self.mock_topology_parser(
+            'module1', 'ParserClass1', [element1])
+        assert parser1 is importlib.import_module('module1').ParserClass1()
+
+        class TopologyElement2(network_topology.NetworkTopologyElement):
+            host_addresses = ['192.168.66.1']
+            valid_vif_types = ['vhostuser']
+            bind_port = mock.Mock()
+
+        element2 = TopologyElement2()
+        parser2 = self.mock_topology_parser(
+            'module2', 'ParserClass2', [element2])
+        assert parser2 is importlib.import_module('module2').ParserClass2()
+
+        self.patch_configuration(
+            valid_vif_types='ovs,vhostuser',
+            network_topology_parsers='module1:ParserClass1,'
+                                     'module2:ParserClass2')
+
+        given_port_context = self.given_port_context()
+        given_driver = mech_driver.OpenDaylightMechanismDriver()
+
+        # when driver is initialized
+        given_driver.initialize()
+        given_driver.bind_port(given_port_context)
+
+        # topology is parsed by both parsers
+        parser1.parse_network_topology.assert_called_once_with(mock.ANY)
+        parser2.parse_network_topology.assert_called_once_with(mock.ANY)
+        self.assertFalse(element2.bind_port.called)
+        element1.bind_port.assert_called_once_with(
+            given_port_context, 'ovs', {'port_filter': True})
+
+    def mock_topology_parser(self, module_name, class_name, topology):
+
+        supported_vif_types = collections.OrderedDict()
+        for element in topology:
+            for vif_type in element.valid_vif_types:
+                supported_vif_types[vif_type] = True
+
+        # create a NetworkTopologyParser subclass with given members
+        parser_class = type(
+            class_name, (network_topology.NetworkTopologyParser,),
+            {'supported_vif_types': list(supported_vif_types),
+             'parse_network_topology': mock.Mock(return_value=topology)})
+
+        # make this class a singleton
+        parser = parser_class()
+        parser_class.__new__ = mock.Mock(return_value=parser)
+
+        assert list(supported_vif_types) == parser_class.supported_vif_types
+        assert topology is parser_class.parse_network_topology.return_value
+        assert parser is parser_class()
+
+        patched_module = self.patch_module(
+            module_name, **{class_name: parser_class})
+
+        assert parser_class is getattr(patched_module, class_name)
+        return parser
+
+    _patched_modules = None
+
+    def patch_module(self, module_name, **kwargs):
+        modules = self._patched_modules
+        if modules is None:
+            self._patched_modules = modules = dict(sys.modules)
+            self.patch(sys, 'modules', modules)
+            self.patch(importlib, 'import_module', modules.get)
+
+        modules[module_name] = patched_module = mock.Mock(**kwargs)
+        assert patched_module == importlib.import_module(module_name)
+        assert patched_module == sys.modules[module_name]
+        return patched_module
+
+    def test_bind_port_from_mech_driver_v2_with_ovs(self):
+        self.patch_client('ovs_topology.json')
+        self.patch_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
+        self.patch_configuration(valid_vif_types=['ovs'])
+
+        given_driver = mech_driver_v2.OpenDaylightMechanismDriver()
+        given_port_context = self.given_port_context()
+
+        # when port is bound
+        given_driver.initialize()
+        given_driver.bind_port(given_port_context)
+
+        # then context binding is setup with returned vif_type and valid
+        # segment api ID
+        given_port_context.set_binding.assert_called_once_with(
+            self.valid_segment[driver_api.ID], portbindings.VIF_TYPE_OVS,
+            {'port_filter': True}, status=n_constants.PORT_STATUS_ACTIVE)
 
     def test_bind_port_from_mech_driver_v2_with_vhostuser(self):
         given_client = self.mock_client('vhostuser_topology.json')
-        self.mock_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
+        self.patch_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
         given_network_topology = network_topology.NetworkTopologyManager(
             vif_details={'some': 'detail'},
             client=given_client)
@@ -302,6 +466,7 @@ class TestNetworkTopologyManager(base.DietTestCase):
         given_topology.bind_port(given_port_context)
 
         self.assertFalse(given_port_context.set_binding.called)
+
         logger.exception.assert_called_once_with(
             'Network topology element has failed binding port:\n%(element)s',
             {'element': mock.ANY})
@@ -312,7 +477,7 @@ class TestNetworkTopologyManager(base.DietTestCase):
             {'host_name': 'some_host', 'valid_vif_types': 'vhostuser, ovs'})
 
     def _mock_network_topology(self, given_topology, vif_details=None):
-        self.mock_get_addresses_by_name(
+        self.patch_get_addresses_by_name(
             ['127.0.0.1', '10.237.214.247', '192.168.66.1'])
         return network_topology.NetworkTopologyManager(
             client=self.mock_client(given_topology),

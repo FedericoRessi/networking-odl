@@ -63,3 +63,41 @@
      enable_plugin networking-odl http://git.openstack.org/openstack/networking-odl
      SKIP_OVS_INSTALL=True
      Q_ML2_PLUGIN_MECHANISM_DRIVERS=opendaylight
+
+10. Configure port binding
+
+The network port binding for spawned VMs can be implemented by more (virtual)
+switch implementations. The way network ports are binded to virtual network
+can be restricted configuring a list of knwon VIF types. Known valid vif types
+are for example 'ovs' and 'vhostuser'. You can specify this ordered list by
+editing 'ODL_VALID_VIF_TYPES' variable in the local.conf file::
+
+     > cat local.conf
+     [[local|localrc]]
+     ODL_VALID_VIF_TYPES=vhostuser,ovs
+
+Port binding is performed detecting VIF types supported by compute host where
+new virtual machine is going to be spawn. Host capabilities are inferred by
+parsing network topology fetched from OpenDayligh using following URL:
+
+http://<odl-server-ip>:<port>/restconf/operational/network-topology:network-topology
+
+where odl-server-ip could be for example 192.168.2.10 and port 8087. This URL
+can be changed editing local.conf::
+
+     > cat local.conf
+     [[local|localrc]]
+     ODL_NETWORK_TOPOLOGY_URL="http://192.168.2.10:8087/restconf/operational/network-topology:network-topology"
+
+By the default above URL is obtained from the URL networking-odl is configured
+to connect to OpenDaylight north bound.
+
+Network topology is parsed to detect supported VIF type by a list of pluggable
+network topology parsers. These parsers are created starting from a list of
+know class names implementing NetworkTopologyParser interface.
+You can specify this ordered list by editing 'ODL_NETWORK_TOPOLOGY_PARSERS'
+variable in the local.conf file::
+
+     > cat local.conf
+     [[local|localrc]]
+     ODL_NETWORK_TOPOLOGY_PARSERS=networking_odl.ml2.ovsdb_topology:OvsdbNetworkTopologyParser

@@ -34,6 +34,8 @@ LOG = log.getLogger(__name__)
 
 class OvsdbNetworkTopologyParser(network_topology.NetworkTopologyParser):
 
+    supported_vif_types = ['vhostuser', 'ovs']
+
     def new_element(self, uuid):
         return OvsdbNetworkTopologyElement(uuid=uuid)
 

@@ -14,18 +14,18 @@
 #    under the License.
 
 import abc
+import collections
 import importlib
 import logging
 
+from oslo_config import cfg
+from oslo_log import log
+from oslo_serialization import jsonutils
 import six
 from six.moves.urllib import parse
 
-from neutron.extensions import portbindings
-from oslo_log import log
-from oslo_serialization import jsonutils
-
 from networking_odl.common import cache
-from networking_odl.common import client
+from networking_odl.common import client as client
 from networking_odl.common import utils
 from networking_odl.common._i18n import _LI, _LW, _LE
 
@@ -35,29 +35,81 @@ LOG = log.getLogger(__name__)
 
 class NetworkTopologyManager(object):
 
-    # the first valid vif type will be chosed following the order
-    # on this list. This list can be modified to adapt to user preferences.
-    valid_vif_types = [
-        portbindings.VIF_TYPE_VHOST_USER, portbindings.VIF_TYPE_OVS]
+    def __init__(
+            self, vif_details=None, client=None, valid_vif_types=None,
+            network_topology_url=None, network_topology_parsers=None):
 
-    # List of class names of registered implementations of interface
-    # NetworkTopologyParser
-    network_topology_parsers = [
-        'networking_odl.ml2.ovsdb_topology.OvsdbNetworkTopologyParser']
-
-    def __init__(self, vif_details=None, client=None):
-        # Details for binding port
-        self._vif_details = vif_details or {}
-
-        # Rest client used for getting network topology from ODL
-        self._client = client or NetworkTopologyClient.create_client()
+        LOG.debug(
+            'Initializing NetworkTopologyManager:\n'
+            '    vif_details: %(vif_details)r\n'
+            '    client: %(client)r\n'
+            '    valid_vif_types: %(valid_vif_types)r\n'
+            '    network_topology_url: %(network_topology_url)r\n'
+            '    network_topology_parsers: %(network_topology_parsers)r',
+            {'vif_details': vif_details,
+             'client': client,
+             'valid_vif_types': valid_vif_types,
+             'network_topology_url': network_topology_url,
+             'network_topology_parsers': network_topology_parsers})
 
         # Table of NetworkTopologyElement
         self._elements_by_ip = cache.Cache(
             self._fetch_and_parse_network_topology)
 
+        # Details for binding port
+        self._vif_details = vif_details = vif_details or {}
+
+        # Rest client used for getting network topology from ODL
+        self._client = client =\
+            client or NetworkTopologyClient.create_client(
+                network_topology_url=network_topology_url)
+
+        parser_classes = NetworkTopologyParser.all_subclasses(
+            parser_class_names=network_topology_parsers)
+        LOG.debug('parser_classes: %r', parser_classes)
+
+        supported_vif_types = NetworkTopologyParser.all_supported_vif_types(
+            parser_classes=parser_classes)
+        if not supported_vif_types:
+            LOG.warning(_LW('No such supported VIF type!'))
+        else:
+            LOG.debug('supported_vif_types: %r', supported_vif_types)
+        if valid_vif_types:
+            valid_vif_types = [
+                vif_type for vif_type in valid_vif_types
+                if vif_type in supported_vif_types]
+        else:
+            # all suppported VIF types are valid
+            valid_vif_types = supported_vif_types
+
         # Parsers used for processing network topology
-        self._parsers = list(self._create_parsers())
+        self.valid_vif_types = valid_vif_types
+        if not valid_vif_types:
+            LOG.warning(_LW('No such valid VIF type!'))
+        else:
+            LOG.debug('valid_vif_types: %r', supported_vif_types)
+
+        self._parsers = NetworkTopologyParser.create_parsers(
+            valid_vif_types=valid_vif_types,
+            parser_classes=parser_classes)
+
+    @classmethod
+    def create_topology_manager(cls, vif_details=None, client=None):
+        if cfg.CONF.ml2_odl.valid_vif_types:
+            valid_vif_types = cfg.CONF.ml2_odl.valid_vif_types.split(',')
+        else:
+            valid_vif_types = []
+        if cfg.CONF.ml2_odl.network_topology_parsers:
+            network_topology_parsers =\
+                cfg.CONF.ml2_odl.network_topology_parsers.split(',')
+        else:
+            network_topology_parsers = []
+
+        return cls(
+            vif_details=vif_details, client=client,
+            valid_vif_types=valid_vif_types,
+            network_topology_url=cfg.CONF.ml2_odl.network_topology_url,
+            network_topology_parsers=network_topology_parsers)
 
     def bind_port(self, port_context):
         """Set binding for a valid segment
@@ -72,7 +124,9 @@ class NetworkTopologyManager(object):
         except Exception:
             LOG.exception(
                 _LE('Error fetching elements for host %(host_name)r.'),
-                {'host_name': host_name}, exc_info=1)
+                {'host_name': host_name})
+        else:
+            LOG.debug('Elements fetched from network topology: %r', elements)
 
         if not elements:
             # In case it wasn't able to find any network topology element
@@ -87,27 +141,9 @@ class NetworkTopologyManager(object):
             from networking_odl.ml2 import ovsdb_topology
             elements = [ovsdb_topology.OvsdbNetworkTopologyElement()]
 
-        # TODO(Federico Ressi): in the case there are more candidate virtual
-        # switches instances for the same host it choses one for binding
-        # port. As there isn't any know way to perform this selection it
-        # selects a VIF type that is valid for all switches that have
-        # been found and a VIF type valid for all them. This has to be improved
         for vif_type in self.valid_vif_types:
-            vif_type_is_valid_for_all = True
             for element in elements:
-                if vif_type not in element.valid_vif_types:
-                    # it is invalid for at least one element: discard it
-                    vif_type_is_valid_for_all = False
-                    break
-
-            if vif_type_is_valid_for_all:
-                # This is the best VIF type valid for all elements
-                LOG.debug(
-                    "Found VIF type %(vif_type)r valid for all network "
-                    "topology elements for host %(host_name)r.",
-                    {'vif_type': vif_type, 'host_name': host_name})
-
-                for element in elements:
+                if vif_type in element.valid_vif_types:
                     # It assumes that any element could be good for given host
                     # In most of the cases I expect exactely one element for
                     # every compute host
@@ -128,17 +164,6 @@ class NetworkTopologyManager(object):
                 '\tvalid VIF types: %(valid_vif_types)s'),
             {'host_name': host_name,
              'valid_vif_types': ', '.join(self.valid_vif_types)})
-        # TDOO(Federico Ressi): should I raise an exception here?
-
-    def _create_parsers(self):
-        for parser_name in self.network_topology_parsers:
-            try:
-                yield NetworkTopologyParser.create_parser(parser_name)
-
-            except Exception:
-                LOG.exception(
-                    _LE('Error initializing topology parser: %(parser_name)r'),
-                    {'parser_name': parser_name})
 
     def _fetch_elements_by_host(self, host_name, cache_timeout=60.0):
         '''Yields all network topology elements referring to given host name
@@ -230,20 +255,18 @@ class NetworkTopologyManager(object):
 @six.add_metaclass(abc.ABCMeta)
 class NetworkTopologyParser(object):
 
-    @classmethod
-    def create_parser(cls, parser_class_name):
-        '''Creates a 'NetworkTopologyParser' of given class name.
+    # List of class names of registered implementations of interface
+    # NetworkTopologyParser
+    all_subclasse_names = [
+        'networking_odl.ml2.ovsdb_topology:OvsdbNetworkTopologyParser']
 
-        '''
-        module_name, class_name = parser_class_name.rsplit('.', 1)
-        module = importlib.import_module(module_name)
-        clss = getattr(module, class_name)
-        if not issubclass(clss, cls):
-            raise TypeError(
-                "Class {class_name!r} of module {module_name!r} doesn't "
-                "implement 'NetworkTopologyParser' interface.".format(
-                    class_name=class_name, module_name=module_name))
-        return clss()
+    # Mapping name to class of pre-load parser classes
+    _all_subclasses = collections.OrderedDict()
+
+    @abc.abstractproperty
+    @classmethod
+    def supported_vif_types(cls):
+        'List of VIF types supported by this parser class'
 
     @abc.abstractmethod
     def parse_network_topology(self, network_topology):
@@ -252,6 +275,83 @@ class NetworkTopologyParser(object):
         Yields all network topology elements implementing
         'NetworkTopologyElement' interface found in given network topology.
         '''
+
+    @classmethod
+    def all_subclasses(cls, parser_class_names=None):
+        parser_class_names = parser_class_names or cls.all_subclasse_names
+        return list(
+            cls._iter_subclasses(parser_class_names=parser_class_names))
+
+    @classmethod
+    def _iter_subclasses(cls, parser_class_names):
+        '''Iterates over all registered implementations of the interface.
+
+        '''
+        for parser_class_name in parser_class_names:
+            try:
+                yield cls.subclass_from_name(parser_class_name)
+            except Exception:
+                LOG.exception(
+                    _LE('Invalid subclass name: %r'), parser_class_name)
+
+    @classmethod
+    def all_supported_vif_types(cls, parser_classes=None):
+        # Using an ordered dict to keep the order and assure every entry
+        # is contained only once.
+        supported_vif_types = collections.OrderedDict()
+        for subclass in parser_classes or cls.all_subclasses():
+            for vif_type in subclass.supported_vif_types:
+                supported_vif_types[vif_type] = None
+        return list(supported_vif_types)
+
+    @classmethod
+    def create_parsers(cls, valid_vif_types, parser_classes=None):
+        '''Creates and registers parsers of classes
+
+        Yields only parsers the support al least one of given valid VIF types
+        '''
+
+        # valid VIF type.
+        for subclass in parser_classes or cls.all_subclasses():
+            try:
+                if set(valid_vif_types) & set(subclass.supported_vif_types):
+                    yield subclass()
+                else:
+                    LOG.info(
+                        _LI("Parser class %(parser_class_name)r doens't "
+                            "support any valid VIF type: %(valid_vif_types)s"),
+                        {'parser_class_name': subclass.__name__,
+                         'valid_vif_types': ', '.join(valid_vif_types)})
+            except Exception:
+                LOG.exception(
+                    _LE('Error creating networking topology parser of class '
+                        '%(parser_class)r'),
+                    {'parser_class': subclass.__name__})
+
+    @classmethod
+    def subclass_from_name(cls, subclass_name):
+        subclass = cls._all_subclasses.get(subclass_name)
+        if subclass is None:
+            module_name, class_name = subclass_name.rsplit(':', 1)
+            module = importlib.import_module(module_name)
+            subclass = getattr(module, class_name, None)
+            if subclass is None:
+                raise ValueError(
+                    "Class {class_name!r} not defined in module "
+                    "{module_name!r}.".format(
+                        class_name=class_name, module_name=module_name))
+
+            if not issubclass(subclass, cls):
+                raise TypeError(
+                    "Class {class_name!r} of module {module_name!r} is not "
+                    "a subclass of {this_class_name!r}.".format(
+                        class_name=class_name, module_name=module_name,
+                        this_class_name=cls.__name__))
+
+            LOG.info(_LI("Network topology parser class imported: %r"),
+                     subclass_name)
+            cls._all_subclasses[subclass_name] = subclass
+        return subclass
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -305,16 +405,19 @@ class NetworkTopologyClient(client.OpenDaylightRestClient):
     _GET_ODL_NETWORK_TOPOLOGY_URL =\
         'restconf/operational/network-topology:network-topology'
 
-    def __init__(self, url, username, password, timeout):
-        if url:
-            url = parse.urlparse(url)
-            port = ''
-            if url.port:
-                port = ':' + str(url.port)
-            topology_url = '{}://{}{}/{}'.format(
-                url.scheme, url.hostname, port,
-                self._GET_ODL_NETWORK_TOPOLOGY_URL)
-        else:
-            topology_url = None
+    def __init__(
+            self, url, username, password, timeout, network_topology_url=None):
+        if not network_topology_url:
+            if url:
+                url = parse.urlparse(url)
+                port = ''
+                if url.port:
+                    port = ':' + str(url.port)
+                network_topology_url =\
+                    '{}://{}{}/{}'.format(
+                        url.scheme, url.hostname, port,
+                        self._GET_ODL_NETWORK_TOPOLOGY_URL)
+
         super(NetworkTopologyClient, self).__init__(
-            topology_url, username, password, timeout)
+            url=network_topology_url, username=username, password=password,
+            timeout=timeout)
