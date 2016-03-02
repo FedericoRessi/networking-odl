@@ -242,8 +242,9 @@ class OpenDaylightDriver(object):
         self.client = odl_client.OpenDaylightRestClient.create_client()
         self.sec_handler = odl_call.OdlSecurityGroupsHandler(self)
         self.vif_details = {portbindings.CAP_PORT_FILTER: True}
-        self._network_topology = network_topology.NetworkTopologyManager(
-            vif_details=self.vif_details)
+        self._network_topology =\
+            network_topology.NetworkTopologyManager.create_topology_manager(
+                vif_details=self.vif_details)
 
     def synchronize(self, operation, object_type, context):
         """Synchronize ODL with Neutron following a configuration change."""

@@ -159,12 +159,12 @@ class TestNetworkTopologyManager(base.DietTestCase):
 
         given_client = self.mock_client('ovs_topology.json')
         self.mock_get_addresses_by_name(['127.0.0.1', '10.237.214.247'])
-        given_network_topology = network_topology.NetworkTopologyManager(
+        given_manager = network_topology.NetworkTopologyManager(
             vif_details={'some': 'detail'},
             client=given_client)
         self.patch(
-            network_topology, 'NetworkTopologyManager',
-            return_value=given_network_topology)
+            network_topology.NetworkTopologyManager,
+            'create_topology_manager', return_value=given_manager)
 
         given_driver = mech_driver.OpenDaylightMechanismDriver()
         given_driver.odl_drv = mech_driver.OpenDaylightDriver()
@@ -183,12 +183,12 @@ class TestNetworkTopologyManager(base.DietTestCase):
 
         given_client = self.mock_client('vhostuser_topology.json')
         self.mock_get_addresses_by_name(['127.0.0.1', '192.168.66.1'])
-        given_network_topology = network_topology.NetworkTopologyManager(
+        given_manager = network_topology.NetworkTopologyManager(
             vif_details={'some': 'detail'},
             client=given_client)
         self.patch(
-            network_topology, 'NetworkTopologyManager',
-            return_value=given_network_topology)
+            network_topology.NetworkTopologyManager,
+            'create_topology_manager', return_value=given_manager)
 
         given_driver = mech_driver.OpenDaylightMechanismDriver()
         given_driver.odl_drv = mech_driver.OpenDaylightDriver()

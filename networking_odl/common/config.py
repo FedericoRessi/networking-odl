@@ -34,6 +34,9 @@ odl_opts = [
     cfg.BoolOpt('enable_lightweight_testing',
                 default=False,
                 help='Test without real ODL'),
+    cfg.StrOpt('valid_vif_types',
+               help=_("List of valid VIF types for port binding like 'ovs', "
+                      "'vhostuser', etc.")),
 ]
 
 cfg.CONF.register_opts(odl_opts, "ml2_odl")

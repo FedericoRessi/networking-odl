@@ -13,17 +13,22 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# python framework
 import abc
 import importlib
 import logging
 
+# external libs
+from oslo_config import cfg
+from oslo_log import log
+from oslo_serialization import jsonutils
 import six
 from six.moves.urllib import parse
 
+# OpenStack
 from neutron.extensions import portbindings
-from oslo_log import log
-from oslo_serialization import jsonutils
 
+# networking-odl
 from networking_odl.common import cache
 from networking_odl.common import client
 from networking_odl.common import utils
@@ -45,7 +50,31 @@ class NetworkTopologyManager(object):
     network_topology_parsers = [
         'networking_odl.ml2.ovsdb_topology.OvsdbNetworkTopologyParser']
 
-    def __init__(self, vif_details=None, client=None):
+    @classmethod
+    def create_topology_manager(
+            cls, vif_details=None, client=None, valid_vif_types=None):
+
+        if not valid_vif_types:
+            valid_vif_types_option = cfg.CONF.ml2_odl.valid_vif_types
+            if valid_vif_types_option:
+                valid_vif_types = [
+                    s.strip()
+                    for s in valid_vif_types_option.split(',')
+                    if s.strip()]
+
+        LOG.debug(
+            'Creating NetworkTopologyManager:\n'
+            '    vif_details: %(vif_details)r\n'
+            '    client: %(client)r\n'
+            '    valid_vif_types: %(valid_vif_types)r\n',
+            {'vif_details': vif_details,
+             'client': client,
+             'valid_vif_types': valid_vif_types})
+        return cls(
+            vif_details=vif_details, client=client,
+            valid_vif_types=valid_vif_types)
+
+    def __init__(self, vif_details=None, client=None, valid_vif_types=None):
         # Details for binding port
         self._vif_details = vif_details or {}
 
@@ -55,6 +84,10 @@ class NetworkTopologyManager(object):
         # Table of NetworkTopologyElement
         self._elements_by_ip = cache.Cache(
             self._fetch_and_parse_network_topology)
+
+        # Valid VIF types
+        if valid_vif_types:
+            self.valid_vif_types = valid_vif_types
 
         # Parsers used for processing network topology
         self._parsers = list(self._create_parsers())

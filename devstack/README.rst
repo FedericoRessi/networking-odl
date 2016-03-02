@@ -63,3 +63,15 @@
      enable_plugin networking-odl http://git.openstack.org/openstack/networking-odl
      SKIP_OVS_INSTALL=True
      Q_ML2_PLUGIN_MECHANISM_DRIVERS=opendaylight
+
+10. Configure port binding
+
+The network port binding for spawned VMs can be implemented by more (virtual)
+switch implementations. The way network ports are binded to virtual network
+can be restricted configuring a list of knwon VIF types. Known valid vif types
+are for example 'ovs' and 'vhostuser'. You can specify this ordered list by
+editing 'ODL_VALID_VIF_TYPES' variable in the local.conf file::
+
+     > cat local.conf
+     [[local|localrc]]
+     ODL_VALID_VIF_TYPES=vhostuser,ovs
